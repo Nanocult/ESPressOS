@@ -11,6 +11,7 @@
 #include <stdlib.h>
 
 static const char* TAG = "app_loader";
+static const int8 PSRAM_POOL_BLOCK_SIZE = 4;
 
 /* ========================================================================== */
 /* INTERNAL CONTEXT STRUCTURE                                                 */
@@ -201,7 +202,7 @@ load_result_t app_loader_load(const char* path, app_context_t** out_ctx) {
     size_t loaded_size = hdr.code_size + hdr.rodata_size + hdr.data_size;
     size_t total_ram = loaded_size + hdr.bss_size;
 
-    psram_block = psram_pool_alloc_aligned(total_ram, 4);
+    psram_block = psram_pool_alloc_aligned(total_ram, PSRAM_POOL_BLOCK_SIZE);
     if (!psram_block) {
         ESP_LOGE(TAG, "PSRAM allocation failed (%u bytes)", total_ram);
         result = LOAD_ERR_PSALLOC;
