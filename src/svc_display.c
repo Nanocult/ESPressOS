@@ -70,6 +70,17 @@ void svc_display_init(void) {
     ESP_LOGI(TAG, "✓ Display manager initialized (240×320, double-buffered)");
 }
 
+/*
+// TODO: add in init function:
+esp_timer_create_args_t tick_cfg = {
+    .callback = lvgl_tick_cb,
+    .name = "lvgl_tick"
+};
+ESP_ERROR_CHECK(esp_timer_create(&tick_cfg, &s_lvgl_tick_timer));
+ESP_ERROR_CHECK(esp_timer_start_periodic(s_lvgl_tick_timer, 1000)); // 1ms
+
+*/
+
 /* ========================================================================== */
 /* KERNEL API IMPLEMENTATIONS                                                 */
 /* ========================================================================== */
