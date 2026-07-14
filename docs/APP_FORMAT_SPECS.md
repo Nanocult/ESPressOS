@@ -218,3 +218,138 @@ esp_err_t load_app(const char* path, void** entry_point) {
 | Add new flag bit (unused bits) | Document, no version bump | Forward compatible |
 
 > 🔒 **Golden Rule:** Never modify existing fields in `espapp_header_t` or existing relocation types. Always append. Apps built against ABI v1 must run on kernel v1, v2, v3... indefinitely.
+
+---
+
+## 10. ESPAPP linker
+
+The complete espapp linker script with proper Xtensa LX7 section attributes located at `espapp/core/espapp.ld`
+
+This linker script is engineered specifically for the ESP32-S3 Xtensa LX7 architecture and the .espapp binary format. It enforces strict section isolation, generates a predictable memory layout for single-pass loading, and ensures all code is position-independent.
+
+### Critical Usage Notes
+
+#### 1. Compiler Flags Required
+This linker script **only works** with these exact flags in your app's CMakeLists.txt:
+```cmake
+target_compile_options(${APP_TARGET} PRIVATE
+    -fPIC                    # Position Independent Code (MANDATORY)
+    -mlongcalls              # Allow calls beyond 256KB range
+    -mtext-section-literals  # Place literals in .text for L32R reach
+    -ffunction-sections      # Enable dead code elimination
+    -fdata-sections          # Enable unused data removal
+    -nostdlib                # No standard library linking (use kernel API only)
+)
+
+target_link_options(${APP_TARGET} PRIVATE
+    -T${CMAKE_CURRENT_SOURCE_DIR}/espapp.ld
+    -Wl,--gc-sections        # Remove unused sections
+    -Wl,-static              # No dynamic linking
+    -Wl,--no-check-sections  # Skip ELF segment overlap checks (virtual origins)
+)
+```
+
+#### 2. App Entry Point Convention
+Every app **must** define its entry point exactly as:
+```c
+// In app source file
+void __attribute__((section(".entry.app_main"))) app_main(const KernelAPI* api) {
+    // Store api pointer globally, initialize app
+}
+```
+The `.entry.app_main` section attribute guarantees it lands at offset 0 in `.text`, making `entry_offset` in the header always equal to `0`. This simplifies the loader.
+
+#### 3. Why Virtual Origins Start at 0x00000000
+The Xtensa LX7 `-fPIC` code uses PC-relative addressing. By setting `.text` origin to 0, all compiled offsets are relative to the code section base. The loader simply adds the actual PSRAM base address during relocation. This eliminates the need for runtime GOT patching for intra-app references.
+
+#### 4. L32R Literal Pool Placement
+The assertion `(__espapp_rodata_start - __espapp_code_start) < 256K` is **non-negotiable**. Xtensa L32R instructions can only reference literals within a 256KB window. If your code section grows large, you must enable `-mtext-section-literals` (already in flags above) which embeds literals directly in `.text` near their usage sites, keeping `.rodata` for true global constants only.
+
+#### 5. Post-Build Tool Integration Points
+The `__espapp_*` symbols are exported in the ELF symbol table. Your Python post-build script extracts them via:
+```python
+# Pseudocode for build_espapp.py
+symbols = parse_elf_symbols("app.elf")
+header.code_size   = symbols["__espapp_code_size"]
+header.rodata_size = symbols["__espapp_rodata_size"] 
+header.data_size   = symbols["__espapp_data_size"]
+header.bss_size    = symbols["__espapp_bss_size"]
+```
+These symbols are **not** included in the final `.espapp` binary—they exist only in the intermediate ELF for toolchain consumption.
+
+### Validation Checklist Before Use
+
+- [ ] Verify Xtensa toolchain version ≥ 2023r1 (older versions have broken `-fPIC` for LX7)
+- [ ] Confirm `-mtext-section-literals` is active (check `objdump -d app.elf | grep l32r` shows inline literals)
+- [ ] Test with a minimal app that calls every Kernel API function to validate GOT/reloc generation
+- [ ] Run `size app.elf` to confirm no `.bss` bytes appear in "text" or "data" columns
+- [ ] Validate alignment: `objdump -h app.elf` shows all section alignments as 4 or greater
+
+---
+
+## Python post-build tool** 
+
+`build_espapp.py`  consumes the linker script's output and produces signed `.espapp` binaries, or the **Kernel API header (`kernel_api.h`)** that defines the function pointer table referenced by relocation type `REL_KERNEL_API` (located in `espapp/core/build_espapp.py`). This Python tool is the bridge between your CMake build and the ESP-AppOS runtime. It parses the ELF produced by espapp.ld, extracts sections/symbols, converts Xtensa relocations to our compact format, assembles the flat binary, and signs it.
+
+Save `build_espapp.py` file in your project's `tools/` directory. It requires only Python 3.8+ standard library modules (no external dependencies like pyelftools to keep CI environments clean).
+
+### CMake Integration
+Add this to each app's `CMakeLists.txt` to automate the post-build step:
+
+```cmake
+# After defining your app target:
+add_custom_command(
+    TARGET ${APP_TARGET} POST_BUILD
+    COMMAND ${PYTHON_EXECUTABLE}
+        ${CMAKE_SOURCE_DIR}/tools/build_espapp.py
+        $<TARGET_FILE:${APP_TARGET}>
+        ${CMAKE_BINARY_DIR}/${APP_TARGET}.espapp
+        ${CMAKE_SOURCE_DIR}/keys/app_signing_key.pem
+        --abi-version 1
+    COMMENT "Building .espapp binary for ${APP_TARGET}"
+    DEPENDS ${CMAKE_SOURCE_DIR}/tools/build_espapp.py
+)
+
+# Optional: Add custom target for convenience
+add_custom_target(${APP_TARGET}_espapp
+    DEPENDS ${CMAKE_BINARY_DIR}/${APP_TARGET}.espapp
+)
+```
+
+### Key Generation (One-Time Setup)
+
+Generate your ED25519 signing keypair:
+```bash
+# Generate private key (KEEP SECURE - never commit to repo)
+openssl genpkey -algorithm ed25519 -out keys/app_signing_key.pem
+
+# Extract public key (embed this in your ESP32 kernel for verification)
+openssl pkey -in keys/app_signing_key.pem -pubout -out keys/app_public_key.pem
+```
+
+### Critical Implementation Notes
+
+1. Zero External Dependencies: The ELF parser is intentionally minimal. It handles only what .espapp needs. If you encounter edge cases with newer toolchains, replace ElfParser with pyelftools — the rest of the script remains unchanged.
+2. Relocation Conversion is Simplified: The current convert_relocations() handles R_XTENSA_32 and basic SLOT0_OP. For production, you must expand this to handle all Xtensa PIC relocation types your specific GCC version emits. Test with every app and check for WARNING: Skipping unsupported reloc messages.
+3. Entry Offset is Always 0: The linker script forces app_main into .entry.app_main at the start of .text. The tool hardcodes entry_offset = 0. If you change the linker script, update line 247 accordingly.
+4. CRC32 Compatibility: Uses Python's binascii.crc32 which matches ESP-ROM's crc32_le. Do NOT use zlib.crc32 — it produces different results on some platforms.
+5. Signing Fallback: Without cryptography installed, the tool produces a zero-filled signature. This lets you test the build pipeline before setting up key management. Never ship with placeholder signatures.
+6. Section Padding: Every section is padded to 4-byte alignment before assembly. This guarantees the PSRAM load destination is always aligned, preventing Xtensa bus faults.
+
+### Validation Checklist
+After integrating, verify with:
+```bash
+# Build an app
+idf.py build
+
+# Inspect the output
+python tools/build_espapp.py build/app.elf build/app.espapp keys/app_signing_key.pem
+
+# Verify structure
+xxd build/app.espapp | head -4          # Should start with 41 50 53 45 ("ESPA")
+stat -c%s build/app.espapp              # Should match total_size in header
+sha256sum build/app.espapp              # Record for OTA integrity checks
+```
+
+
+
