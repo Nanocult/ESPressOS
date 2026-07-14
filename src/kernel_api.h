@@ -229,6 +229,9 @@ typedef struct {
     
     /** Cancel and destroy timer. */
     k_err_t (*timer_delete)(k_timer_t timer);
+
+    /** Safe integer to string conversion (base 10) */
+    void (*itoa)(int val, char* buf, int min_width);
 } k_sys_api_t;
 
 /* ========================================================================== */
