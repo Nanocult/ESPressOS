@@ -218,4 +218,26 @@ GET /api/v1/apps/{name}.espapp.sig
 | Power loss during provisioning | On reboot: partial files in `/cache`, no broken apps in `/apps` | Atomic rename guarantee verified |
 | Loose SD contact (intermittent CD) | Health check detects I/O error → shows error overlay | Recovers when contact restored |
 
+---
 
+### 🏗️ Architectural Improvements
+
+| Issue | Current State | Improved Design |
+| :--- | :--- | :--- |
+| **LVGL Thread Safety** | Apps call LVGL directly from their task → race conditions with flush callback | All LVGL calls routed through display service mutex + dedicated LVGL task. Apps submit commands via queue. |
+| **App Crash Isolation** | App fault crashes entire kernel | Wrap `app_loader_run()` in task with stack canary + watchdog. Fault triggers graceful unload + crash report to SD. |
+| **Audio Format Negotiation** | Hardcoded 44.1kHz stereo | Apps declare required format in manifest. Audio engine resamples or rejects mismatch. |
+| **Storage Provisioning Security** | Downloads directly to apps dir | Download → SHA256 verify → ED25519 verify → atomic rename. Three-stage pipeline. |
+| **Debug Visibility** | Only serial log | Add kernel debug overlay (toggle with long-press button): shows FPS, RAM, active app, storage state. |
+
+---
+
+### 💡 Suggested Additional Features 
+
+TODO: implement these kernel-level capabilities that are nearly impossible to retrofit later:
+
+1.  **App Manifest Parser**: Load `/apps/<name>.manifest.json` before binary. Contains: version, min ABI, required permissions, icon path, display resolution hint. Enables launcher grid rendering without loading app code.
+2.  **Crash Reporter Service**: On app fault, capture PC, backtrace, registers, and last 256 log lines. Write to `/sdcard/crash_reports/<timestamp>.crash`. Next boot shows "App X crashed" notification.
+3.  **Input Manager Service**: Centralize button/touch/encoder handling. Apps register interest via `api->input.subscribe(mask, callback)`. Kernel routes events, handles long-press system gestures (volume, brightness, force-quit).
+4.  **Power Manager Integration**: Dim display after 30s idle. Deep sleep after 5min. Wake on touch/button/mic wake-word. Expose `api->sys.set_idle_timeout()` for apps (e.g., audio player disables sleep).
+5.  **Kernel Self-Test Mode**: Boot-time validation of PSRAM pool, audio DMA, display flush, SD read/write. Shows green/red status screen. Essential for manufacturing QA and field diagnostics.
