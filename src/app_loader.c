@@ -80,6 +80,41 @@ static load_result_t validate_header(const espapp_header_t* hdr) {
 /* Single-pass, in-place patching of PSRAM-resident code                      */
 /* ========================================================================== */
 
+/*
+Bug: Casting KernelAPI* to uintptr_t* and indexing assumes no padding between struct members. 
+Any compiler optimization level change or struct modification breaks all existing apps silently.
+Fix: Build an explicit flat function pointer table at kernel init time.
+
+// ✅ ADD to kernel_main.c
+#define KERNEL_API_FN_COUNT 32 // Update when adding functions
+static uintptr_t g_api_fn_table[KERNEL_API_FN_COUNT];
+
+void kernel_build_api_table(void) {
+    int i = 0;
+    // Memory
+    g_api_fn_table[i++] = (uintptr_t)psram_pool_alloc;
+    g_api_fn_table[i++] = (uintptr_t)psram_pool_alloc_aligned;
+    g_api_fn_table[i++] = (uintptr_t)psram_pool_free;
+    g_api_fn_table[i++] = (uintptr_t)psram_pool_realloc;
+    g_api_fn_table[i++] = (uintptr_t)psram_pool_free_size;
+    // Display
+    g_api_fn_table[i++] = (uintptr_t)svc_display_init_screen;
+    g_api_fn_table[i++] = (uintptr_t)svc_display_obj_create;
+    // ... continue for ALL functions in exact order matching REL_KERNEL_API indices
+    assert(i <= KERNEL_API_FN_COUNT);
+}
+
+// In apply_relocations(), replace the fragile cast:
+if (r->target >= 0x10 && r->target <= 0xFF) {
+    uint8_t idx = r->target - 0x10;
+    if (idx >= KERNEL_API_FN_COUNT) { 
+        ESP_LOGE(TAG, "ERROR");
+    }
+    target_val = g_api_fn_table[idx];
+}
+
+*/
+
 static load_result_t apply_relocations(
     void* app_base,
     const espapp_header_t* hdr,
