@@ -89,9 +89,13 @@ k_err_t svc_audio_write(k_audio_handle_t handle, const void* data, size_t len, u
 }
 
 k_err_t svc_audio_close(k_audio_handle_t handle) {
-    /* Drain ringbuffer on close to prevent stale audio */
-    vRingbufferDelete(s_playback_rb);
-    s_playback_rb = xRingbufferCreate(RINGBUF_SIZE, RINGBUF_TYPE_BYTEBUF);
+    if (handle != (k_audio_handle_t)0xAUDIO_OUT) return K_ERR_INVALID;
+    // Drain without destroying - preserves DMA continuity
+    void* item;
+    size_t len;
+    while ((item = xRingbufferReceiveUpTo(s_playback_rb, &len, 0, RINGBUF_SIZE)) != NULL) {
+        vRingbufferReturnItem(s_playback_rb, item);
+    }
     return K_OK;
 }
 
