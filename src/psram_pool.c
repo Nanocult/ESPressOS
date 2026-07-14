@@ -194,7 +194,26 @@ void* psram_pool_alloc_aligned(size_t size, size_t alignment) {
     return user_ptr;
 }
 
+/*
+Bug: A malicious/corrupt app could pass a pointer where (uint8_t*)ptr - HEADER_SIZE 
+underflows into kernel memory, reading garbage as a header and potentially 
+freeing arbitrary PSRAM regions.
+Fix: Validate pointer is within pool bounds before accessing header.
+
+*/
+
 void psram_pool_free(void* ptr) {
+    uintptr_t ptr_addr = (uintptr_t)ptr;
+    uintptr_t pool_start = (uintptr_t)g_pool.pool_base;
+    uintptr_t pool_end = pool_start + (g_pool.total_blocks * PSRAM_POOL_BLOCK_SIZE);
+
+    //Validate pointer is within pool bounds before accessing header.
+    if (ptr_addr < pool_start + HEADER_SIZE || ptr_addr >= pool_end) {
+        ESP_LOGE(TAG, "FREE OUT OF BOUNDS: %p (pool: %p-%p)", 
+                 ptr, (void*)pool_start, (void*)pool_end);
+        return;
+    }
+
     if (!ptr || !g_pool.initialized) return;
     
     /* Recover header */
