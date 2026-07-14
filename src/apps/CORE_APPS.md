@@ -59,7 +59,6 @@ cd apps/clock && mkdir build && cd build && cmake .. && make build_espapp
 
 ---
 
-
 ## Kernel-Side Implementation Updates
 
 To make the app's string-based UI commands work, svc_display.c needs a property parser. Add this to svc_display.c:
@@ -152,7 +151,173 @@ Execute this sequence to validate the entire Phase 1 + Phase 2 stack:
 
 If this sequence completes successfully, **you have a fully functional, dynamically loading embedded OS**. 
 
+---
 
+## App Launcher 
+
+The App Launcher is the central hub of ESP-AppOS. It must dynamically discover installed apps, render a touch-friendly grid, and instruct the kernel to swap the active application.
+To achieve this without standard library bloat, we need to extend the Kernel API with directory iteration, app-launch requests, and flexible UI layout support.
+
+
+### FS Directory Iteration (svc_fs.c)
+Wrap ESP-IDF's POSIX directory functions, enforcing path sandboxing.
+
+### Launch Request (lifecycle_manager.c)
+The lifecycle manager needs a global state to track the next app to run.
+
+
+static char g_pending_launch[32] = {0};
+
+k_err_t svc_sys_request_launch(const char* app_name) {
+    if (!app_name || strlen(app_name) >= sizeof(g_pending_launch)) return K_ERR_INVALID;
+    strncpy(g_pending_launch, app_name, sizeof(g_pending_launch) - 1);
+    g_pending_launch[sizeof(g_pending_launch) - 1] = '\0';
+    ESP_LOGI("LIFECYCLE", "Pending launch requested: %s", g_pending_launch);
+    return K_OK;
+}
+
+/* In the main kernel loop: */
+void kernel_lifecycle_loop(void) {
+    char current_app[32] = "launcher"; // Start with launcher
+    
+    while (1) {
+        app_context_t* ctx = NULL;
+        char path[64];
+        snprintf(path, sizeof(path), "/sdcard/apps/%s.espapp", current_app);
+        
+        load_result_t res = app_loader_load(path, &ctx);
+        if (res == LOAD_OK) {
+            app_sandbox_run(ctx); // Blocks until app exits or crashes
+            app_loader_unload(ctx);
+        } else {
+            ESP_LOGE("LIFECYCLE", "Failed to load %s: %s", current_app, app_loader_error_str(res));
+            vTaskDelay(pdMS_TO_TICKS(2000)); // Prevent bootloop
+        }
+        
+        // Determine next app
+        if (g_pending_launch[0] != '\0') {
+            strncpy(current_app, g_pending_launch, sizeof(current_app));
+            g_pending_launch[0] = '\0'; // Clear flag
+        } else {
+            strcpy(current_app, "launcher"); // Fallback to launcher
+        }
+    }
+}
+
+
+### Display Service Flex Layout Support
+Update svc_display.c to support grid layouts via the string property API.
+
+
+/* Add to svc_display_obj_set_prop */
+else if (strcmp(prop, "layout") == 0) {
+    if (strcmp(value, "flex_row_wrap") == 0) {
+        lv_obj_set_layout(o, LV_LAYOUT_FLEX);
+        lv_obj_set_flex_flow(o, LV_FLEX_FLOW_ROW_WRAP);
+        lv_obj_set_flex_align(o, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    } else if (strcmp(value, "flex_col") == 0) {
+        lv_obj_set_layout(o, LV_LAYOUT_FLEX);
+        lv_obj_set_flex_flow(o, LV_FLEX_FLOW_COLUMN);
+    }
+}
+else if (strcmp(prop, "pad_all") == 0) {
+    lv_obj_set_style_pad_all(o, atoi(value), 0);
+}
+else if (strcmp(prop, "symbol") == 0) {
+    lv_label_set_text(o, value); // LV_SYMBOL_* are just special UTF-8 strings
+}
+
+
+---
+
+### The Launcher App (app_launcher.c)
+This app scans /sdcard/apps/, parses .manifest.json files using a minimal custom parser (no cJSON dependency), and renders a grid of icons.
+
+Manifest File Standard
+To test the launcher, create manifest files on your SD card alongside the .espapp binaries.
+/sdcard/apps/clock.manifest.json
+
+```json
+{
+  "name": "Clock",
+  "icon": "clock.bin",
+  "version": "1.0.0",
+  "abi_min": 1
+}
+```
+
+/sdcard/apps/launcher.manifest.json
+
+```json
+{
+  "name": "Home",
+  "icon": "home.bin",
+  "version": "1.0.0",
+  "abi_min": 1
+}
+```
+
+---
+
+## Audio Player App
+
+To validate the I2S ringbuffer pipeline, we will build an Audio Player App that streams raw PCM data from .wav files on the SD card. For this validation, we will bypass MP3 decoding (which requires bundling a heavy library like libhelix or minimp3 into the app) and focus strictly on the Filesystem → App Buffer → Kernel Ringbuffer → I2S DMA pipeline. This ensures the hardware audio path is bulletproof before adding CPU-intensive decoding layers in Phase 3.
+
+### Critical Design: Non-Blocking Streaming
+
+A common embedded mistake is blocking the UI thread (LVGL timer) while waiting for the audio buffer to drain or the SD card to read. This app uses a zero-timeout write strategy with a "pending chunk" state. If the kernel's audio ringbuffer is full, the app saves the chunk in RAM and retries on the next 20ms timer tick. The UI remains at 60FPS even if the SD card stalls.
+
+### The Audio Player App (app_audio.c)
+This app is entirely self-contained, uses zero standard library functions, and manages its own resources cleanly on exit.
+
+### Testing the Pipeline End-to-End
+To validate the hardware and software stack, follow this exact procedure:
+
+**Step 1**: Generate Test Audio
+Your kernel's I2S DMA is currently hardcoded to 44.1kHz, 16-bit, Stereo. You must generate a compatible test file.
+Using ffmpeg on your PC:
+
+```bash
+ffmpeg -i your_song.mp3 -ar 44100 -ac 2 -sample_fmt s16 test_audio.wav
+```
+
+**Step 2**: Prepare SD Card
+- Create a folder named media at the root of your SD card.
+- Copy test_audio.wav into /media/.
+- Ensure audio.espapp and audio.manifest.json are in /apps/.
+
+**Step 3**: Validation Matrix
+Execute these tests to verify the architecture:
+
+| Test Scenario | Expected Behavior | What it Validates |
+| :--- | :--- | :--- |
+| **Boot & Navigate** | Launcher shows "Audio Player". Tap to load. | App loading, manifest parsing, UI rendering. |
+| **File Discovery** | Lists `test_audio.wav` in the UI grid. | `fs.opendir` / `fs.readdir` sandbox routing. |
+| **Initial Play** | Tap file → Tap Play. Audio starts instantly. | WAV header skip, I2S DMA startup, Ringbuffer feed. |
+| **UI Responsiveness** | Tap buttons rapidly while audio plays. | **Crucial:** Zero-timeout writes prove LVGL task is never blocked by audio/SD. |
+| **Pause / Resume** | Tap Pause. Audio stops. Tap Resume. Audio continues from exact same timestamp. | File handle persistence, timer recreation. |
+| **Track Switching** | Tap a second file while first is playing. | Graceful teardown of I2S handles, `app_deinit` logic. |
+| **SD Card Eject** | Physically remove SD card while playing. | Kernel Storage Manager triggers force-quit → `app_deinit` runs → No kernel crash. |
+| **App Exit** | Long-press BACK to return to Launcher. | PSRAM pool shows 0 bytes used (no memory leaks). |
+
+---
+
+## Validation Checklist
+
+| Test Step | Expected Behavior |
+| :--- | :--- |
+| **1. Clean Boot** | Kernel mounts SD → Loads `launcher.espapp` → Renders "ESP-AppOS" header and grid. |
+| **2. Discovery** | Reads `clock.manifest.json` → Renders "Clock" button with `LV_SYMBOL_CLOCK`. |
+| **3. Missing Manifest** | If `clock.manifest.json` is missing, the app is ignored (or shows raw filename if logic adjusted). |
+| **4. Touch/Click** | Tapping "Clock" triggers `on_app_clicked` → Calls `request_launch("clock")` → Calls `request_exit()`. |
+| **5. Transition** | Launcher unloads (PSRAM freed) → Kernel lifecycle loop reads `g_pending_launch` → Loads `clock.espapp`. |
+| **6. Return Home** | (Future) Long-press BACK button triggers system gesture → Force-quits Clock → Kernel falls back to `launcher`. |
+| **7. Memory Leak** | Launch/exit cycle 10 times. `psram_pool_dump_stats()` must show 0 used blocks between transitions. |
+
+## Development challanges
+
+App Compatibility Drift: If kernel API changes, old downloaded apps break. Implement API versioning in manifest and backward-compatible shim layers.
+Security of Downloaded Apps: Unsigned binaries = malware risk. Implement ED25519 signature verification in bootloader/app-loader before execution.
 
 
 
