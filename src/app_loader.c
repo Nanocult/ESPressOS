@@ -325,6 +325,10 @@ void app_loader_unload(app_context_t* ctx) {
     if (ctx->psram_base) {
         psram_pool_free(ctx->psram_base);
         ctx->psram_base = NULL;
+
+        // After every unload, verify no leaks:
+        // psram_pool_dump_stats();
+        // Expected: Used = 0 blocks, Fragmentation = 0.0%
     }
 
     ctx->is_loaded = false;
