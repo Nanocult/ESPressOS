@@ -10,6 +10,11 @@
  * - All function pointers use __attribute__((cdecl)) for Xtensa compatibility.
  */
 
+/* TODO:
+Action Required: Bump KERNEL_ABI_VERSION_MINOR to 1 in kernel_api.h and build_espapp.py. 
+Update kernel_main.c to wire svc_clock_get_datetime and a simple k_itoa implementation into g_kernel_api.
+*/
+
 #ifndef ESPAPPOS_KERNEL_API_H
 #define ESPAPPOS_KERNEL_API_H
 
@@ -234,6 +239,24 @@ typedef struct {
     void (*itoa)(int val, char* buf, int min_width);
 } k_sys_api_t;
 
+/** Self-contained datetime struct (replaces struct tm) */
+typedef struct {
+    uint16_t year;    /* e.g., 2026 */
+    uint8_t  month;   /* 1-12 */
+    uint8_t  day;     /* 1-31 */
+    uint8_t  hour;    /* 0-23 */
+    uint8_t  min;     /* 0-59 */
+    uint8_t  sec;     /* 0-59 */
+    uint8_t  wday;    /* 0-6 (0=Sunday) */
+    bool     is_synced;
+} k_datetime_t;
+
+/** Clock API Sub-table */
+typedef struct {
+    k_err_t (*get_datetime)(k_datetime_t* out_dt);
+    bool (*is_synced)(void);
+} k_clock_api_t;
+
 /* ========================================================================== */
 /* MASTER KERNEL API STRUCTURE                                                */
 /* This is the ONLY symbol exported to apps.                                  */
@@ -252,23 +275,13 @@ typedef struct {
     k_fs_api_t      fs;
     k_net_api_t     net;
     k_sys_api_t     sys;
+
+    k_clock_api_t clock;
     
     /* FUTURE EXTENSIONS: Add new sub-API pointers here. 
      * Apps compiled against older ABI will have these as NULL.
      * Always check for NULL before calling extended APIs. */
 } KernelAPI;
-
-/** Self-contained datetime struct (replaces struct tm) */
-typedef struct {
-    uint16_t year;    /* e.g., 2026 */
-    uint8_t  month;   /* 1-12 */
-    uint8_t  day;     /* 1-31 */
-    uint8_t  hour;    /* 0-23 */
-    uint8_t  min;     /* 0-59 */
-    uint8_t  sec;     /* 0-59 */
-    uint8_t  wday;    /* 0-6 (0=Sunday) */
-    bool     is_synced;
-} k_datetime_t;
 
 /* ========================================================================== */
 /* APP ENTRY POINT PROTOTYPE                                                  */
