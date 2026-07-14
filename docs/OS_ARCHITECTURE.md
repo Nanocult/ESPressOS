@@ -162,6 +162,99 @@ The Storage Manager Service runs persistently in the kernel, monitors the SDMMC 
 5. Lifecycle Integration: Reacting to Storage Events (lifecycle_manager.c)
 Wire the storage manager into your kernel's lifecycle/app launcher so the UI responds appropriately.
 
+---
+
+## The Crash Isolation Wrapper 
+
+### App Crash Isolation Wrapper (`app_sandbox.h/.c`)
+
+This wrapper runs every app in a dedicated FreeRTOS task with stack canaries, watchdog monitoring, and fault capture. When an app crashes, the kernel recovers gracefully and logs forensic data, ensures a faulty app never kills the kernel.
+
+> ⚠️ **Critical Integration Note:** You must register `app_sandbox_panic_hook` with ESP-IDF's panic handler in `kernel_main.c`:
+> ```c
+> extern void app_sandbox_panic_hook(uint32_t, uint32_t);
+> // In app_main():
+> esp_register_panic_handler(app_sandbox_panic_hook);
+> ```
+> Also initialize TWDT early: `esp_task_wdt_init(CONFIG_ESP_TASK_WDT_TIMEOUT_S, true);`
+
+### Input Manager Service (`svc_input.h/.c`)
+
+The Input Manager provides a centralized, gesture-aware input pipeline that apps subscribe to rather than polling hardware directly. Centralizes all physical input handling. Supports multi-consumer subscriptions, system gesture interception (long-press volume, double-tap wake), and debouncing. Apps receive clean events through the Kernel API. 
+
+#### Wiring Into Kernel API Table
+
+Update `kernel_main.c` to expose these services through the ABI:
+
+```c
+/* Add to k_sys_api_t in kernel_api.h FIRST (append only!): */
+// int (*input_subscribe)(uint32_t mask, void (*cb)(const void*, void*), void* ud);
+// void (*input_unsubscribe)(int sub_id);
+
+/* In kernel_main.c g_kernel_api initialization: */
+.sys = {
+    // ... existing fields ...
+    .input_subscribe   = (void*)svc_input_subscribe,
+    .input_unsubscribe = (void*)svc_input_unsubscribe,
+},
+```
+
+> ⚠️ **ABI Version Bump Required:** Adding fields to `k_sys_api_t` requires incrementing `KERNEL_ABI_VERSION_MINOR` in `kernel_api.h`. All existing apps remain compatible since new fields are appended.
+
+#### Usage Example From an App
+
+```c
+/* Inside a .espapp application */
+static const KernelAPI* g_api;
+
+static void on_input(const void* raw_evt, void* ud) {
+    const input_event_t* evt = (const input_event_t*)raw_evt;
+    
+    switch (evt->type) {
+        case INPUT_EVT_BTN_PRESS:
+            g_api->sys.log(2, "MyApp", "Button %d pressed", evt->button.btn_id);
+            break;
+        case INPUT_EVT_TOUCH_DOWN:
+            g_api->sys.log(2, "MyApp", "Touch at %d,%d", evt->touch.x, evt->touch.y);
+            break;
+        default: break;
+    }
+}
+
+void app_main(const KernelAPI* api) {
+    g_api = api;
+    
+    /* Subscribe to buttons + touch */
+    uint32_t mask = INPUT_EVT_BTN_PRESS | INPUT_EVT_BTN_RELEASE | 
+                    INPUT_EVT_TOUCH_DOWN | INPUT_EVT_TOUCH_MOVE;
+    api->sys.input_subscribe(mask, on_input, NULL);
+    
+    /* App continues via callbacks - no polling needed */
+}
+
+void app_deinit(void) {
+    /* Unsubscribe handled automatically by kernel on unload,
+       but explicit unsubscribe is good practice */
+}
+```
+
+#### Validation Checklist 
+
+| Test | Pass Criteria |
+| :--- | :--- |
+| App calls `abort()` | Sandbox catches fault, writes crash report, kernel continues |
+| App infinite loop | TWDT triggers after 5s, crash report generated |
+| App stack overflow | Canary detects, panic hook fires, recovery succeeds |
+| Rapid button presses | No bounce artifacts, correct press/release pairs |
+| Long press BTN_UP | Volume increases, event NOT forwarded to app |
+| Long press BACK > 2s | Force-quit gesture consumed, app unloaded |
+| 16 subscribers active | All receive matching events, no missed deliveries |
+| Eject SD during crash report write | Partial file cleaned up, no FS corruption |
+| Normal app exit | Sandbox returns LOAD_OK, no resources leaked |
+| Repeated crash/reload cycle | No memory growth over 50 iterations |
+
+---
+
 ### Critical Integration Notes
 
 | Concern | Solution |
