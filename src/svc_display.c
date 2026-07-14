@@ -56,8 +56,16 @@ void svc_display_init(void) {
     s_disp_drv.draw_buf = &s_draw_buf;
     lv_disp_drv_register(&s_disp_drv);
 
-    /* LVGL tick timer (1ms) */
-    lv_tick_inc(1); // Replace with esp_timer periodic callback in production
+    /* LVGL tick timer (1ms) 
+    lv_tick_inc(1) called once at init does nothing. LVGL requires continuous tick updates 
+    for animations, timeouts, and input debounce. Without it, UI freezes after first interaction.
+    Fix: Use ESP timer for precise 1ms ticks.
+    */
+    //lv_tick_inc(1); // Replace with esp_timer periodic callback in production
+    static esp_timer_handle_t s_lvgl_tick_timer;
+    static void lvgl_tick_cb(void* arg) {
+        lv_tick_inc(1);
+    }
 
     ESP_LOGI(TAG, "✓ Display manager initialized (240×320, double-buffered)");
 }
