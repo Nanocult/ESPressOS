@@ -351,5 +351,69 @@ stat -c%s build/app.espapp              # Should match total_size in header
 sha256sum build/app.espapp              # Record for OTA integrity checks
 ```
 
+---
 
+## Kernel Implementation Guidance
+
+## Kernel API header (kernel_api.h)
+
+**Kernel-Side**: Populating the API Table (`/src/kernel_init.c`)
+
+Kernel API header (kernel_api.h) defines the function pointer table and all service interfaces apps will call through this ABI  ABI contract between the ESPressOS kernel and every .espapp binary. It must be included by both the kernel (to populate the function pointer table) and every app (to call kernel services). Any change to this file requires bumping ESPAPP_ABI_VERSION in build_espapp.py.
+
+**App-Side**: Using the API
+
+Every app stores the pointer and uses it exclusively:
+
+```c
+#include "kernel_api.h"
+
+static const KernelAPI* g_api = NULL;
+
+void app_main(const KernelAPI* api) {
+    /* ABI compatibility check - FIRST thing always */
+    if (api->abi_version < KERNEL_ABI_VERSION) {
+        /* Cannot safely use any API. Show error or request update. */
+        return;
+    }
+    g_api = api;
+    
+    /* Initialize display */
+    g_api->display.init_screen(240, 320);
+    
+    /* Allocate buffer from PSRAM pool */
+    uint8_t* buf = (uint8_t*)g_api->mem.malloc(4096);
+    if (!buf) {
+        g_api->sys.log(0, "MyApp", "OOM on startup");
+        g_api->sys.request_exit();
+        return;
+    }
+    
+    /* Create UI, set up timers, etc. */
+    /* ... */
+    
+    /* DO NOT return to exit. Use request_exit() when done. */
+}
+
+/* Optional cleanup - called automatically before unload */
+void app_deinit(void) {
+    if (g_api) {
+        g_api->display.cleanup();
+        g_api->sys.log(2, "MyApp", "Deinitialized cleanly");
+    }
+}
+```
+
+### Critical ABI Rules Enforcement Checklist
+
+| Rule | Verification Method | Consequence of Violation |
+| :--- | :--- | :--- |
+| Never remove/reorder fields | Code review + ABI version test suite | App crashes or corrupts memory |
+| New fields appended only | Static assert on struct size growth | Old apps read garbage |
+| No ESP-IDF types in API | Compile apps with `-nostdlib` | Link failures or ABI drift |
+| All function pointers cdecl | Test on real hardware | Calling convention mismatch crash |
+| Opaque handles only | Audit: no struct definitions exposed | App breaks on kernel internal refactor |
+| `app_main` signature exact | Linker script enforces `.entry.app_main` | Loader jumps to wrong address |
+
+---
 
