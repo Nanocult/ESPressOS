@@ -1,4 +1,4 @@
-# App Binary Format Decision
+# App Binary Format
 
 > This document defines the EPSressOS Binary Format Specification v1.0. This format is designed specifically for the ESP32-S3 Xtensa LX7 architecture, optimizing for minimal storage footprint, fast sequential loading from SDMMC, and safe dynamic relocation in Octal PSRAM.
 
