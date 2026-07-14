@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 
 static const char* TAG = "svc_storage";
+static SemaphoreHandle_t s_fs_lock; // Binary semaphore, initialized in init
 
 /* Hardware config - adjust to your PCB */
 #define SD_DETECT_GPIO      GPIO_NUM_13
@@ -153,6 +154,35 @@ static k_err_t provision_from_server(const char* base_url) {
 /* MONITOR TASK                                                               */
 /* Runs at low priority, polls CD pin + validates FS health                   */
 /* ========================================================================== */
+
+/*
+Bug: When CD pin goes high (eject), unmount_safe() is called, but running apps may still be inside fread/fwrite calls. 
+FAT filesystem state becomes corrupted.
+Fix: Add a global "storage busy" lock that apps acquire during FS operations, and wait for it before unmounting.
+
+// Apps call this via kernel API wrapper:
+k_err_t svc_storage_acquire_fs(uint32_t timeout_ms) {
+    if (xSemaphoreTake(s_fs_lock, pdMS_TO_TICKS(timeout_ms)) != pdTRUE)
+        return K_ERR_BUSY;
+    return K_OK;
+}
+void svc_storage_release_fs(void) {
+    xSemaphoreGive(s_fs_lock);
+}
+
+// In monitor task eject handler:
+if (!cd) {
+    // Wait up to 500ms for active FS ops to complete
+    if (xSemaphoreTake(s_fs_lock, pdMS_TO_TICKS(500)) == pdTRUE) {
+        unmount_safe();
+        xSemaphoreGive(s_fs_lock);
+    } else {
+        ESP_LOGE(TAG, "Force unmount - FS op timed out!");
+        unmount_safe(); // Acceptable risk on physical eject
+    }
+    set_state(STORAGE_STATE_EJECTED, "Card removed");
+}
+*/
 
 static void storage_monitor_task(void* arg) {
     TickType_t last_check = xTaskGetTickCount();
