@@ -255,6 +255,18 @@ typedef struct {
      * Always check for NULL before calling extended APIs. */
 } KernelAPI;
 
+/** Self-contained datetime struct (replaces struct tm) */
+typedef struct {
+    uint16_t year;    /* e.g., 2026 */
+    uint8_t  month;   /* 1-12 */
+    uint8_t  day;     /* 1-31 */
+    uint8_t  hour;    /* 0-23 */
+    uint8_t  min;     /* 0-59 */
+    uint8_t  sec;     /* 0-59 */
+    uint8_t  wday;    /* 0-6 (0=Sunday) */
+    bool     is_synced;
+} k_datetime_t;
+
 /* ========================================================================== */
 /* APP ENTRY POINT PROTOTYPE                                                  */
 /* Every .espapp MUST define this function.                                   */
