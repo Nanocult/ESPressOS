@@ -101,3 +101,190 @@ typedef struct {
     k_err_t (*delete_media)(const char* path);
 } k_gallery_api_t;
 ```
+
+---
+
+## Hardware Pinout: OV2640 DVP Camera
+
+```
+ESP32-S3 GPIO    OV2640 Pin    Function
+─────────────────────────────────────────
+GPIO 15          D0            Data bit 0
+GPIO 17          D1            Data bit 1
+GPIO 18          D2            Data bit 2
+GPIO 16          D3            Data bit 3
+GPIO 14          D4            Data bit 4
+GPIO 12          D5            Data bit 5
+GPIO 11          D6            Data bit 6
+GPIO 48          D7            Data bit 7
+GPIO 13          VSYNC         Vertical sync
+GPIO 38          HREF          Horizontal reference
+GPIO 10          PCLK          Pixel clock
+GPIO 40          XCLK          Master clock (20MHz output)
+GPIO 39          SDA           SCCB (I2C) Data
+GPIO 41          SCL           SCCB (I2C) Clock
+GPIO 21          RESET         Active low reset
+GPIO 47          PWDN          Power down (active high)
+```
+
+---
+
+## 1. Camera Service (`svc_camera.h/.c`)
+
+This service manages the OV2640 hardware, framebuffers in PSRAM, and provides capture APIs.
+
+
+## 2. Gallery Service (`svc_gallery.h/.c`)
+
+Manages media files, generates thumbnails, and provides indexing.
+
+## 3. Social Media Service (`svc_social.h/.c`)
+
+Handles Telegram Bot API integration with OAuth token storage.
+
+## 4. Camera App (`app_camera.c`)
+
+The complete user-facing application with viewfinder, gallery, settings, and voice commands.
+
+## 5. Kernel API Extensions (ABI v1.7)
+
+Update `kernel_api.h`:
+
+```c
+/* Add new API sub-tables */
+typedef struct {
+    k_err_t (*init)(void);
+    k_err_t (*capture_jpeg)(const char* path, int quality);
+    k_err_t (*start_video)(const char* path, int fps);
+    k_err_t (*stop_video)(void);
+    k_err_t (*get_preview_rgb565)(uint8_t* buf, int width, int height);
+    k_err_t (*set_resolution)(int res);
+    k_err_t (*set_quality)(int quality);
+    k_err_t (*set_effect)(int effect);
+    bool (*is_recording)(void);
+} k_camera_api_t;
+
+typedef struct {
+    k_err_t (*scan_media)(void);
+    int (*get_count)(void);
+    k_err_t (*get_info)(int index, void* out_info);
+    k_err_t (*generate_thumbnail)(const char* path, uint8_t* buf, int w, int h);
+    k_err_t (*delete)(const char* path);
+} k_gallery_api_t;
+
+typedef struct {
+    k_err_t (*init)(void);
+    bool (*is_connected)(int platform);
+    k_err_t (*connect_telegram)(const char* bot_token, const char* chat_id);
+    k_err_t (*disconnect)(int platform);
+    k_err_t (*upload_photo)(int platform, const char* path, const char* caption, void (*progress_cb)(int));
+} k_social_api_t;
+
+/* Add to KernelAPI struct (append only): */
+typedef struct {
+    // ... existing fields ...
+    k_camera_api_t camera;
+    k_gallery_api_t gallery;
+    k_social_api_t social;
+} KernelAPI;
+```
+
+Wire in `kernel_main.c`:
+
+```c
+.camera = {
+    .init = svc_camera_init,
+    .capture_jpeg = svc_camera_capture_jpeg,
+    .start_video = svc_camera_start_video,
+    .stop_video = svc_camera_stop_video,
+    .get_preview_rgb565 = svc_camera_get_preview_rgb565,
+    .set_resolution = (void*)svc_camera_set_resolution,
+    .set_quality = svc_camera_set_quality,
+    .set_effect = (void*)svc_camera_set_effect,
+    .is_recording = svc_camera_is_recording,
+},
+.gallery = {
+    .scan_media = svc_gallery_init,
+    .get_count = svc_gallery_get_count,
+    .get_info = (void*)svc_gallery_get_info,
+    .generate_thumbnail = svc_gallery_generate_thumbnail,
+    .delete = svc_gallery_delete,
+},
+.social = {
+    .init = svc_social_init,
+    .is_connected = svc_social_is_connected,
+    .connect_telegram = svc_social_connect_telegram,
+    .disconnect = svc_social_disconnect,
+    .upload_photo = svc_social_upload_photo,
+},
+```
+
+Add to kernel's `idf_component.yml`:
+
+```yaml
+dependencies:
+  espressif/esp32-camera: "^2.0.0"
+```
+
+---
+
+## 7. Deployment & Testing
+
+### Build & Deploy
+
+```bash
+# 1. Build kernel with camera support
+cd esp-appos
+idf.py build flash monitor
+
+# 2. Build camera app
+cd apps/camera
+mkdir build && cd build
+cmake .. && make build_espapp
+
+# 3. Copy to SD card
+cp build/camera.espapp /mnt/sd/apps/
+echo '{"name":"Camera","build":1}' > /mnt/sd/apps/camera.manifest.json
+mkdir -p /mnt/sd/media
+```
+
+### Telegram Setup
+
+1. Create a Telegram bot via [@BotFather](https://t.me/BotFather)
+2. Get your Bot Token (e.g., `123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11`)
+3. Get your Chat ID by messaging [@userinfobot](https://t.me/userinfobot)
+4. In the Camera app Settings screen, tap "Connect Telegram"
+5. Enter Bot Token and Chat ID (via voice or on-screen keyboard)
+
+### Voice Commands
+
+After wake word ("Hey ESP"):
+- "Take picture" → Captures photo to `/media/`
+- "Record video" → Starts/stops MJPEG recording
+- "Open gallery" → Shows photo grid
+- "Post to Telegram" → Uploads last photo
+
+---
+
+## Validation Matrix
+
+| Test | Expected Result |
+|:-----|:----------------|
+| Photo capture | JPEG saved to `/media/YYYYMMDD_HHMMSS.jpg`, ~50-100KB |
+| Video recording | MJPEG file created, ~5MB for 30s VGA video |
+| Gallery browsing | Thumbnails displayed, tap to view full-screen |
+| Telegram upload | Photo appears in Telegram chat within 5s |
+| Voice command "take picture" | Photo captured without touching screen |
+| Settings persistence | Resolution/quality saved to NVS, survives reboot |
+| SD card full | Graceful error message, no crash |
+| Network dropout during upload | Retry logic, progress indicator |
+
+---
+
+## TODO:
+
+1. **Add live preview** - Stream camera frames to LVGL image widget at 10fps
+2. **Implement video audio sync** - Record microphone audio alongside MJPEG frames
+3. **Add more social platforms** - X/Twitter OAuth, Instagram Graph API
+4. **Photo editing** - Crop, filters, text overlay before sharing
+5. **Cloud backup** - Auto-upload to Google Drive/Dropbox
