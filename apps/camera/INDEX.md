@@ -266,6 +266,160 @@ After wake word ("Hey ESP"):
 
 ---
 
+## Video Audio Sync Implementation (`svc_av_recorder.h/c`) and A/V Recorder (`svc_av_recorder.c`)
+
+The synchronized A/V recorder service that captures MJPEG video frames and PCM audio together in a simple container format. This will handle timestamp synchronization, buffering, and file I/O in a dedicated background task.
+
+A simple custom container format **ESPAV** (ESP Audio Video) specification:
+[ESPAV_SPECS.md](ESPAV_SPECS.md)
+
+A Python tool to convert `.espav` files to standard formats
+[/tools/espav_converter.py](/tools/espav_converter.py)
+
+### Kernel API Extension
+
+Update `kernel_api.h` to expose the A/V recorder:
+
+```c
+typedef struct {
+    k_err_t (*init)(void);
+    k_err_t (*start)(const char* path, int video_fps, int audio_sample_rate, int audio_channels, int audio_bits);
+    k_err_t (*stop)(void);
+    int (*get_state)(void);
+    uint32_t (*get_duration_ms)(void);
+    uint32_t (*get_frame_count)(void);
+} k_av_recorder_api_t;
+
+// Add to KernelAPI struct (append only):
+typedef struct {
+    // ... existing fields ...
+    k_av_recorder_api_t av_recorder;
+} KernelAPI;
+```
+
+Wire in `kernel_main.c`:
+
+```c
+.av_recorder = {
+    .init = svc_av_recorder_init,
+    .start = (k_err_t (*)(const char*, int, int, int, int))svc_av_recorder_start_wrapper,
+    .stop = svc_av_recorder_stop,
+    .get_state = (int (*)(void))svc_av_recorder_get_state,
+    .get_duration_ms = svc_av_recorder_get_duration_ms,
+    .get_frame_count = svc_av_recorder_get_frame_count,
+},
+```
+
+Add wrapper function in `kernel_main.c`:
+
+```c
+static k_err_t svc_av_recorder_start_wrapper(const char* path, int video_fps, int audio_sample_rate, int audio_channels, int audio_bits) {
+    av_recorder_config_t config = {
+        .video_fps = video_fps,
+        .audio_sample_rate = audio_sample_rate,
+        .audio_channels = audio_channels,
+        .audio_bits = audio_bits,
+    };
+    return svc_av_recorder_start(path, &config);
+}
+```
+
+### Camera App Integration
+
+Update `app_camera.c` to use the synchronized recorder:
+
+```c
+static void toggle_video_recording(void) {
+    if (g_api->av_recorder.get_state() == 1) { // RECORDING
+        g_api->av_recorder.stop();
+        g_api->display.obj_set_prop(g_btn_shutter, "text", "● Photo");
+        g_api->display.obj_set_prop(g_lbl_status, "text", "Video saved");
+    } else {
+        time_t now;
+        time(&now);
+        struct tm tm;
+        localtime_r(&now, &tm);
+
+        char path[128];
+        snprintf(path, sizeof(path), "/sdcard/media/%04d%02d%02d_%02d%02d%02d.espav",
+                 tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                 tm.tm_hour, tm.tm_min, tm.tm_sec);
+
+        k_err_t res = g_api->av_recorder.start(path, 15, 16000, 1, 16);
+        
+        if (res == K_OK) {
+            g_api->display.obj_set_prop(g_btn_shutter, "text", "■ Stop");
+            g_api->display.obj_set_prop(g_lbl_status, "text", "Recording...");
+        } else {
+            g_api->display.obj_set_prop(g_lbl_status, "text", "Record failed");
+        }
+    }
+}
+
+// Add periodic UI update in app_main loop
+static void update_recording_status(void* arg) {
+    if (g_api->av_recorder.get_state() == 1) {
+        char status[64];
+        snprintf(status, sizeof(status), "Recording: %us | %u frames",
+                 g_api->av_recorder.get_duration_ms() / 1000,
+                 g_api->av_recorder.get_frame_count());
+        g_api->display.obj_set_prop(g_lbl_status, "text", status);
+    }
+}
+```
+
+### Build Configuration
+
+Add to kernel's `CMakeLists.txt`:
+
+```cmake
+# Add A/V recorder service
+set(SRC_FILES
+    ${SRC_FILES}
+    "services/svc_av_recorder.c"
+)
+```
+
+---
+
+### Build & Deploy
+```bash
+# Rebuild kernel with A/V recorder
+idf.py build flash monitor
+
+# Rebuild camera app
+cd apps/camera/build
+cmake .. && make build_espapp
+
+# Deploy to SD card
+cp camera.espapp /mnt/sd/apps/
+```
+
+### Test Procedure
+1. Launch Camera app
+2. Tap shutter button to start video recording
+3. Record for 10-30 seconds (speak into microphone)
+4. Tap shutter button again to stop
+5. Copy `.espav` file from SD card to PC
+6. Run converter: `python espav_converter.py video.espav output`
+7. Combine with ffmpeg: `ffmpeg -i output.mjpeg -i output.wav -c:v copy -c:a aac video.mp4`
+8. Play `video.mp4` - verify audio/video sync
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+---
+
 ## Validation Matrix
 
 | Test | Expected Result |
@@ -278,13 +432,21 @@ After wake word ("Hey ESP"):
 | Settings persistence | Resolution/quality saved to NVS, survives reboot |
 | SD card full | Graceful error message, no crash |
 | Network dropout during upload | Retry logic, progress indicator |
+| Start recording | Status shows "Recording: 0s \| 0 frames" |
+| Record 10s video | File size ~2MB, 150 frames, audio chunks present |
+| Stop recording | File finalized, status shows "Video saved" |
+| Playback sync | Audio matches video within ±100ms |
+| Long recording (5min) | No dropped frames, stable memory usage |
 
 ---
 
 ## TODO:
 
 1. **Add live preview** - Stream camera frames to LVGL image widget at 10fps
-2. **Implement video audio sync** - Record microphone audio alongside MJPEG frames
+2. ✅ **Implement video audio sync** - Record microphone audio alongside MJPEG frames
 3. **Add more social platforms** - X/Twitter OAuth, Instagram Graph API
 4. **Photo editing** - Crop, filters, text overlay before sharing
 5. **Cloud backup** - Auto-upload to Google Drive/Dropbox
+6. **Implement video thumbnail generation** - Extract first frame for gallery
+7. **Add video playback in gallery** - Play `.espav` files on device
+8. **Optimize for larger files** - Add file size limits, auto-split at 100MB
